@@ -1,4 +1,4 @@
-GCC_FLAGS = -Wextra -Werror -Wall -Wno-gnu-folding-constant
+GCC_FLAGS = -Wall -Wextra -Werror -pthread -Wno-gnu-folding-constant
 
 all: test
 
