@@ -270,6 +270,9 @@ coro_bus_try_recv(struct coro_bus *b, int chn, unsigned *dst)
 	unsigned tmp = dv_pop_one(&c->data);
 	*dst = tmp;
 	wq_wakeup_first(&c->send_queue);
+	if (c->data.size > 0) {
+		wq_wakeup_first(&c->recv_queue);
+	}
 	coro_bus_errno_set(CORO_BUS_ERR_NONE);
 	return 0;
 }
@@ -279,55 +282,64 @@ coro_bus_try_recv(struct coro_bus *b, int chn, unsigned *dst)
 int
 coro_bus_broadcast(struct coro_bus *b, unsigned val)
 {
-	for (;;) {
-		int r = coro_bus_try_broadcast(b, val);
-		if (r == 0) return 0;
-		enum coro_bus_error_code e = coro_bus_errno();
-		if (e != CORO_BUS_ERR_WOULD_BLOCK) return -1;
-		int any = 0;
-		for (int i = 0; i < b->channel_count; i++) {
-			if (b->channels[i]) {
-				any = 1;
-				break;
-			}
-		}
-		if (!any) {
-			coro_bus_errno_set(CORO_BUS_ERR_NO_CHANNEL);
-			return -1;
-		}
-		/* no dedicated queue for broadcast here, so can't suspend properly */
-		return -1;
-	}
+    for (;;) {
+        int rc = coro_bus_try_broadcast(b, val);
+        if (rc == 0)
+            return 0;
+
+        enum coro_bus_error_code err = coro_bus_errno();
+        if (err == CORO_BUS_ERR_NO_CHANNEL)
+            return -1;
+        if (err != CORO_BUS_ERR_WOULD_BLOCK)
+            return -1;
+
+        struct coro_bus_channel *wait_c = NULL;
+        for (int i = 0; i < b->channel_count; i++) {
+            struct coro_bus_channel *c = b->channels[i];
+            if (!c)
+                continue;
+            if (c->data.size >= c->size_limit) {
+                wait_c = c;
+                break;
+            }
+        }
+        if (wait_c == NULL) {
+            continue;
+        }
+        wq_suspend(&wait_c->send_queue);
+    }
 }
 
 int
 coro_bus_try_broadcast(struct coro_bus *b, unsigned val)
 {
-	int found = 0;
-	int block = 0;
-	for (int i = 0; i < b->channel_count; i++) {
-		struct coro_bus_channel *c = b->channels[i];
-		if (!c) continue;
-		found = 1;
-		if (c->data.size >= c->size_limit) block = 1;
-	}
-	if (!found) {
-		coro_bus_errno_set(CORO_BUS_ERR_NO_CHANNEL);
-		return -1;
-	}
-	if (block) {
-		coro_bus_errno_set(CORO_BUS_ERR_WOULD_BLOCK);
-		return -1;
-	}
-	for (int i = 0; i < b->channel_count; i++) {
-		struct coro_bus_channel *c = b->channels[i];
-		if (c) {
-			dv_append(&c->data, val);
-			wq_wakeup_first(&c->recv_queue);
-		}
-	}
-	coro_bus_errno_set(CORO_BUS_ERR_NONE);
-	return 0;
+    int found = 0;
+    int block = 0;
+    for (int i = 0; i < b->channel_count; i++) {
+        struct coro_bus_channel *c = b->channels[i];
+        if (!c)
+            continue;
+        found = 1;
+        if (c->data.size >= c->size_limit)
+            block = 1;
+    }
+    if (!found) {
+        coro_bus_errno_set(CORO_BUS_ERR_NO_CHANNEL);
+        return -1;
+    }
+    if (block) {
+        coro_bus_errno_set(CORO_BUS_ERR_WOULD_BLOCK);
+        return -1;
+    }
+    for (int i = 0; i < b->channel_count; i++) {
+        struct coro_bus_channel *c = b->channels[i];
+        if (c) {
+            dv_append(&c->data, val);
+            wq_wakeup_first(&c->recv_queue);
+        }
+    }
+    coro_bus_errno_set(CORO_BUS_ERR_NONE);
+    return 0;
 }
 
 #endif
@@ -432,6 +444,9 @@ coro_bus_try_recv_v(struct coro_bus *b, int chn, unsigned *dst, unsigned cap)
 	if (n > cap) n = cap;
 	dv_pop_many(&c->data, dst, n);
 	wq_wakeup_first(&c->send_queue);
+	if (c->data.size > 0) {
+		wq_wakeup_first(&c->recv_queue);
+	}
 	coro_bus_errno_set(CORO_BUS_ERR_NONE);
 	return n;
 }
